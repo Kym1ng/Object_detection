@@ -16,7 +16,7 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
-
+# read the parameters from the command line
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -103,13 +103,16 @@ def get_args_parser():
 
 
 def main(args):
+    # initialize the distributed training
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
+    # print the arguments
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
 
+    # set the device
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -117,17 +120,25 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-
+    
+    # initialize the model
     model, criterion, postprocessors = build_model(args)
     model.to(device)
 
+    # load the dataset
     model_without_ddp = model
+    # if the model is trained using distributed training
     if args.distributed:
+        # convert the model to distributed data parallel
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        # get the model without the distributed data parallel
         model_without_ddp = model.module
+    
+    # print the number of parameters
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
+    # initialize the optimizer and the learning rate scheduler parameters
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
         {
@@ -135,28 +146,40 @@ def main(args):
             "lr": args.lr_backbone,
         },
     ]
+
+    # initialize the optimizer and the learning rate scheduler
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
+    # load the dataset
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
+    # initialize the data loaders
     if args.distributed:
+        # if the model is trained using distributed training
+        # then use the distributed sampler for training and validation
         sampler_train = DistributedSampler(dataset_train)
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
+
+    # if the model is not trained using distributed training
+    # then use the random sampler for training and sequential sampler for validation
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
+    # initialize the batch sampler for training
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
-
+    
+    # initialize the data loaders for training and validation
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
+    # load the base dataset for evaluation
     if args.dataset_file == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
         coco_val = datasets.coco.build("val", args)
@@ -164,11 +187,15 @@ def main(args):
     else:
         base_ds = get_coco_api_from_dataset(dataset_val)
 
+    # load the model from the checkpoint
     if args.frozen_weights is not None:
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
+    # create the output directory
     output_dir = Path(args.output_dir)
+
+    # load the model from the checkpoint
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -181,9 +208,12 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
 
+    # evaluate the model
     if args.eval:
+        # evaluate the model
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
+        # save the evaluation results
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
