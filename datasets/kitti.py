@@ -1,101 +1,101 @@
 from pathlib import Path
-
 import torch
 import torch.utils.data
 import torchvision
-from pycocotools import mask as coco_mask
-
 import datasets.transforms as T
 
-# init with image_folder, ann_file, transforms, return_masks
-# do the transformation and prepare like convert coco polys to mask
-class Kitti(torchvision.datasets.Kitti):
-    def __init__(self, img_folder, label_folder, transforms):
-        super(Kitti, self).__init__(img_folder, label_folder)
+KITTI_LABEL_MAP = {
+    "Car": 1,
+    "Pedestrian": 2,
+    "Cyclist": 3,
+    "Truck": 4,
+    "Misc": 5,
+    "Van": 6,
+    "Tram": 7,
+    "Person_sitting": 8,
+    "DontCare": 255  # 'DontCare' objects are ignored
+}
+
+class KittiDetection(torchvision.datasets.Kitti):
+    def __init__(self, root, training_flag, transforms=None):
+        super(KittiDetection, self).__init__(root, train=training_flag, download=False)
         self._transforms = transforms
 
+
     def __getitem__(self, idx):
-        img, target = super(Kitti, self).__getitem__(idx)
-        # prepare the target
-        img, target = self.Kittiprepare(img, target)
-        # do the transformation
+        img, ann = super(KittiDetection, self).__getitem__(idx)
+        # Convert annotations to DETR-compatible format
+        target = self.prepare_kitti_target(idx, ann, img)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
 
+    def prepare_kitti_target(self, idx, ann, img):
+        """ Converts KITTI annotations into COCO-like format for DETR. """
+        w, h = img.size  # Image width and height
+        image_id = torch.tensor([idx])  # Unique image ID
 
-    def Kittiprepare(image, target):
-        w, h = image.size
+        boxes = []
+        labels = []
 
-        image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
+        for obj in ann:
+            category = obj["type"]
+            if category == "DontCare":
+                continue  # Ignore 'DontCare' objects
 
-        anno = target["annotations"]
+            bbox = obj["bbox"]  # [xmin, ymin, xmax, ymax]
+            xmin, ymin, xmax, ymax = bbox
 
-        anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
+            # Ensure box is within image bounds
+            xmin, xmax = max(0, xmin), min(w, xmax)
+            ymin, ymax = max(0, ymin), min(h, ymax)
 
-        boxes = [obj["bbox"] for obj in anno]
-        # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-        boxes[:, 2:] += boxes[:, :2]
-        boxes[:, 0::2].clamp_(min=0, max=w)
-        boxes[:, 1::2].clamp_(min=0, max=h)
+            if xmax <= xmin or ymax <= ymin:
+                continue  # Ignore invalid boxes
 
-        classes = [obj["category_id"] for obj in anno]
-        classes = torch.tensor(classes, dtype=torch.int64)
+            boxes.append([xmin, ymin, xmax, ymax])
+            labels.append(KITTI_LABEL_MAP.get(category, 5))  # Default to 'Misc'
 
-        keypoints = None
-        if anno and "keypoints" in anno[0]:
-            keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = torch.as_tensor(keypoints, dtype=torch.float32)
-            num_keypoints = keypoints.shape[0]
-            if num_keypoints:
-                keypoints = keypoints.view(num_keypoints, -1, 3)
+        # Convert to PyTorch tensors
+        target = {
+            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
+            "labels": torch.as_tensor(labels, dtype=torch.int64),
+            "image_id": image_id,
+            "orig_size": torch.tensor([h, w]),
+            "size": torch.tensor([h, w]),
+        }
 
-        # remove invalid boxes
-        keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
-        boxes = boxes[keep]
-        classes = classes[keep]
-
-        target = {}
-        target["boxes"] = boxes
-        target["labels"] = classes
-        target["image_id"] = image_id
-
-        # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
-        target["area"] = area[keep]
-        target["iscrowd"] = iscrowd[keep]
-
-        target["orig_size"] = torch.as_tensor([int(h), int(w)])
-        target["size"] = torch.as_tensor([int(h), int(w)])
-
-        return image, target
+        return target
 
 
 def make_kitti_transforms(image_set):
-
     normalize = T.Compose([
         T.ToTensor(),
-        # value from ImageNet (pretrained model), using this value implys that the kitti distribution is similar to ImageNet
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    if image_set == 'val':
+    if image_set == "train":
+        return T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomResize([600, 800, 1000]),
+            normalize,
+        ])
+
+    if image_set == "val":
         return T.Compose([
             T.RandomResize([800], max_size=1333),
             normalize,
         ])
 
-    raise ValueError(f'unknown {image_set}')
+    raise ValueError(f"Unknown image_set: {image_set}")
 
 
 def build(image_set, args):
-    # right now its kitti path
-    root = Path(args.coco_path)
-    assert root.exists(), f'provided COCO path {root} does not exist'
-
-    img_folder, label_folder = root / "Kitti/training/image_2", root / "Kitti/training/label_2"
-    dataset = Kitti(img_folder, label_folder, transforms = make_kitti_transforms(image_set))
+    root = Path(args.kitti_path)
+    assert root.exists(), f"Provided KITTI path {root} does not exist"
+    if image_set == "train":
+        training_flag = True
+    else:
+        training_flag = False
+    dataset = KittiDetection(root=root, training_flag=training_flag, transforms=make_kitti_transforms(image_set))
     return dataset

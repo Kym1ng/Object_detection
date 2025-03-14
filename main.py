@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 import datasets
 import util.misc as utils
-from datasets import build_dataset, get_coco_api_from_dataset
+from datasets import build_dataset, get_coco_api_from_dataset, get_kitti_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
@@ -81,6 +81,7 @@ def get_args_parser():
     # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', type=str)
+    parser.add_argument('--kitti_path', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
@@ -178,14 +179,65 @@ def main(args):
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    
+    # Check a single batch from data_loader_val
+    # Check a single batch from data_loader_train
+    # for i, (images, targets) in enumerate(data_loader_train):
+    #     # Determine the number of images and shape of the first image
+    #     if hasattr(images, "tensors"):
+    #         # images is a NestedTensor; use the underlying tensor
+    #         num_images = images.tensors.shape[0]
+    #         first_image_shape = images.tensors[0].shape
+    #     elif isinstance(images, list):
+    #         num_images = len(images)
+    #         first_image_shape = images[0].shape
+    #     else:
+    #         # Fallback if images is a plain tensor
+    #         num_images = images.shape[0]
+    #         first_image_shape = images[0].shape
 
-    # load the base dataset for evaluation
-    if args.dataset_file == "coco_panoptic":
-        # We also evaluate AP during panoptic training, on original coco DS
-        coco_val = datasets.coco.build("val", args)
-        base_ds = get_coco_api_from_dataset(coco_val)
-    else:
-        base_ds = get_coco_api_from_dataset(dataset_val)
+    #     print(f"Batch {i} — Number of images: {num_images}")
+    #     print(f"Shape of the first image: {first_image_shape}")
+
+    #     # Each element in targets is a dictionary
+    #     print("Targets for the first sample in this batch:")
+    #     print(targets[0])
+        
+    #     break  # Only look at the first batch
+
+
+
+    # # load the base dataset for evaluation
+    # if args.dataset_file == "coco_panoptic":
+    #     # We also evaluate AP during panoptic training, on original coco DS
+    #     coco_val = datasets.coco.build("val", args)
+    #     base_ds = get_coco_api_from_dataset(coco_val)
+    # else:
+    #     base_ds = get_coco_api_from_dataset(dataset_val)
+
+    base_ds = get_kitti_api_from_dataset(dataset_train)
+    
+
+    # # Assuming base_ds is the COCO API object from your dataset:
+    # print("COCO dataset keys:", base_ds.dataset.keys())
+    # for key, value in base_ds.dataset.items():
+    #     print(f"{key} ({type(value)}):", value if len(str(value)) < 300 else "large content")
+
+    # #     # Get the first image dictionary from the COCO-style dataset
+    # first_img_dict = base_ds.dataset['images'][0]
+    # print("First image dictionary:")
+    # print(first_img_dict)
+
+    # # Get the image ID from the first image
+    # first_img_id = first_img_dict['id']
+
+    # # Use the COCO API to get all annotation IDs for this image, then load them
+    # ann_ids = base_ds.getAnnIds(imgIds=[first_img_id])
+    # first_img_annotations = base_ds.loadAnns(ann_ids)
+    # print("\nAnnotations for the first image:")
+    # for ann in first_img_annotations:
+    #     print(ann)
+
 
     # load the model from the checkpoint
     if args.frozen_weights is not None:
