@@ -18,12 +18,15 @@ KITTI_LABEL_MAP = {
 
 class KittiDetection(torchvision.datasets.Kitti):
     def __init__(self, root, training_flag, transforms=None):
-        super(KittiDetection, self).__init__(root, train=training_flag, download=False)
+        super(KittiDetection, self).__init__(root, train=training_flag, download=True)
         self._transforms = transforms
 
 
     def __getitem__(self, idx):
         img, ann = super(KittiDetection, self).__getitem__(idx)
+        if ann is None:
+            raise ValueError(f"No annotations found for index {idx} in KITTI dataset.")
+        # print(f"Annotations: {ann}")  # Debugging line to check annotations
         # Convert annotations to DETR-compatible format
         target = self.prepare_kitti_target(idx, ann, img)
         if self._transforms is not None:

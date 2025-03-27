@@ -135,6 +135,29 @@ def main(args):
         # get the model without the distributed data parallel
         model_without_ddp = model.module
     
+
+    # --- ADD MAPPING LAYER FOR KITTI ---
+    if args.dataset_file == 'kitti' and not args.eval:
+        # Assume the pretrained model's classification head outputs 92-dim (COCO)
+        # We want to remap it to 9-dim (8 valid classes + 1 no-object)
+        mapping_layer = torch.nn.Linear(92, 9).to(device)
+        
+        # Optionally, freeze the rest of the model to leverage the pretrained weights:
+        for param in model.parameters():
+            param.requires_grad = False
+        # Unfreeze the mapping layer so that it can learn the KITTI mapping:
+        for param in mapping_layer.parameters():
+            param.requires_grad = True
+        
+        # Combine the original classification head with the mapping layer.
+        # model.class_embed is the original linear layer (outputting 92 dims).
+        # We wrap it into a Sequential module so that forward pass applies both layers.
+        
+        model.class_embed = torch.nn.Sequential(model.class_embed, mapping_layer)
+        print("Mapping layer added: classification head now outputs", mapping_layer.out_features, "classes.")
+    # --- END MAPPING LAYER ADDITION ---
+
+
     # print the number of parameters
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -157,6 +180,15 @@ def main(args):
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
+    # split the dataset into training and validation sets
+    if args.dataset_file == 'kitti':
+        # if the model is trained using kitti dataset
+        # then use the kitti dataset for training and validation as training 0.7 and validation 0.3
+        print("Using KITTI dataset for training and validation")
+        train_size = int(0.7 * len(dataset_train))
+        val_size = len(dataset_train) - train_size
+        dataset_train, dataset_val = torch.utils.data.random_split(dataset_train, [train_size, val_size])
+
     # initialize the data loaders
     if args.distributed:
         # if the model is trained using distributed training
@@ -171,72 +203,21 @@ def main(args):
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     # initialize the batch sampler for training
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-    
+    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
     # initialize the data loaders for training and validation
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                collate_fn=utils.collate_fn, num_workers=args.num_workers)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-    
-    # Check a single batch from data_loader_val
-    # Check a single batch from data_loader_train
-    # for i, (images, targets) in enumerate(data_loader_train):
-    #     # Determine the number of images and shape of the first image
-    #     if hasattr(images, "tensors"):
-    #         # images is a NestedTensor; use the underlying tensor
-    #         num_images = images.tensors.shape[0]
-    #         first_image_shape = images.tensors[0].shape
-    #     elif isinstance(images, list):
-    #         num_images = len(images)
-    #         first_image_shape = images[0].shape
-    #     else:
-    #         # Fallback if images is a plain tensor
-    #         num_images = images.shape[0]
-    #         first_image_shape = images[0].shape
-
-    #     print(f"Batch {i} — Number of images: {num_images}")
-    #     print(f"Shape of the first image: {first_image_shape}")
-
-    #     # Each element in targets is a dictionary
-    #     print("Targets for the first sample in this batch:")
-    #     print(targets[0])
-        
-    #     break  # Only look at the first batch
+                                drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
 
-
-    # # load the base dataset for evaluation
-    # if args.dataset_file == "coco_panoptic":
-    #     # We also evaluate AP during panoptic training, on original coco DS
-    #     coco_val = datasets.coco.build("val", args)
-    #     base_ds = get_coco_api_from_dataset(coco_val)
-    # else:
-    #     base_ds = get_coco_api_from_dataset(dataset_val)
-
-    base_ds = get_kitti_api_from_dataset(dataset_train)
-    
-
-    # # Assuming base_ds is the COCO API object from your dataset:
-    # print("COCO dataset keys:", base_ds.dataset.keys())
-    # for key, value in base_ds.dataset.items():
-    #     print(f"{key} ({type(value)}):", value if len(str(value)) < 300 else "large content")
-
-    # #     # Get the first image dictionary from the COCO-style dataset
-    # first_img_dict = base_ds.dataset['images'][0]
-    # print("First image dictionary:")
-    # print(first_img_dict)
-
-    # # Get the image ID from the first image
-    # first_img_id = first_img_dict['id']
-
-    # # Use the COCO API to get all annotation IDs for this image, then load them
-    # ann_ids = base_ds.getAnnIds(imgIds=[first_img_id])
-    # first_img_annotations = base_ds.loadAnns(ann_ids)
-    # print("\nAnnotations for the first image:")
-    # for ann in first_img_annotations:
-    #     print(ann)
+    # load the base dataset for evaluation
+    if args.dataset_file == "coco_panoptic":
+        # We also evaluate AP during panoptic training, on original coco DS
+        coco_val = datasets.coco.build("val", args)
+        base_ds = get_coco_api_from_dataset(coco_val)
+    else:
+        base_ds = get_coco_api_from_dataset(dataset_val)
 
 
     # load the model from the checkpoint
@@ -262,9 +243,9 @@ def main(args):
 
     # evaluate the model
     if args.eval:
-        # evaluate the model
+    
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
+                                            data_loader_val, base_ds, device, args.output_dir)
         # save the evaluation results
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
@@ -296,7 +277,7 @@ def main(args):
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
         )
-
+        
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
