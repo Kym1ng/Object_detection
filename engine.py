@@ -90,6 +90,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         outputs = model(samples)
+        # print('size of outputs:', outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
+        # print('size of targets:', targets[0]['labels'].shape, targets[0]['boxes'].shape)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
 

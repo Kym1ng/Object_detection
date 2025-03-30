@@ -137,7 +137,7 @@ def main(args):
     
 
     # --- ADD MAPPING LAYER FOR KITTI ---
-    if args.dataset_file == 'kitti' and not args.eval:
+    if args.dataset_file == 'kitti':
         # Assume the pretrained model's classification head outputs 92-dim (COCO)
         # We want to remap it to 9-dim (8 valid classes + 1 no-object)
         mapping_layer = torch.nn.Linear(92, 9).to(device)
@@ -216,8 +216,10 @@ def main(args):
         # We also evaluate AP during panoptic training, on original coco DS
         coco_val = datasets.coco.build("val", args)
         base_ds = get_coco_api_from_dataset(coco_val)
-    else:
+    elif args.dataset_file == "coco":
         base_ds = get_coco_api_from_dataset(dataset_val)
+    elif args.dataset_file == "kitti":
+        base_ds = get_kitti_api_from_dataset(dataset_val)
 
 
     # load the model from the checkpoint
@@ -233,9 +235,17 @@ def main(args):
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
+            state_dict = checkpoint['model']
+            # Rename the old keys to match your new 'class_embed.0.*' submodule
+            if "class_embed.weight" in state_dict:
+                state_dict["class_embed.0.weight"] = state_dict.pop("class_embed.weight")
+            if "class_embed.bias" in state_dict:
+                state_dict["class_embed.0.bias"] = state_dict.pop("class_embed.bias")
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -243,9 +253,9 @@ def main(args):
 
     # evaluate the model
     if args.eval:
-    
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                            data_loader_val, base_ds, device, args.output_dir)
+                            data_loader_val, base_ds, device, args.output_dir)
+
         # save the evaluation results
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
