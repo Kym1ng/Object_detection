@@ -15,6 +15,7 @@ import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset, get_kitti_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+from pycocotools.coco import COCO
 
 # read the parameters from the command line
 def get_args_parser():
@@ -137,24 +138,23 @@ def main(args):
     
 
     # --- ADD MAPPING LAYER FOR KITTI ---
-    if args.dataset_file == 'kitti':
-        # Assume the pretrained model's classification head outputs 92-dim (COCO)
-        # We want to remap it to 9-dim (8 valid classes + 1 no-object)
-        mapping_layer = torch.nn.Linear(92, 9).to(device)
-        
-        # Optionally, freeze the rest of the model to leverage the pretrained weights:
+    if args.coco_path == r'E:\Projects\dataset\coco_like_kitti':
+        # Freeze the entire model first to preserve pretrained weights
         for param in model.parameters():
             param.requires_grad = False
-        # Unfreeze the mapping layer so that it can learn the KITTI mapping:
-        for param in mapping_layer.parameters():
+
+        # Retrieve the input dimension of the existing classification head
+        in_features = model.class_embed.in_features
+
+        # Create a new linear layer with output dimension 9 (instead of the original 92, for example)
+        model.class_embed = torch.nn.Linear(in_features, 9).to(device)
+
+        # Unfreeze the new classification head's parameters, so they can be trained
+        for param in model.class_embed.parameters():
             param.requires_grad = True
-        
-        # Combine the original classification head with the mapping layer.
-        # model.class_embed is the original linear layer (outputting 92 dims).
-        # We wrap it into a Sequential module so that forward pass applies both layers.
-        
-        model.class_embed = torch.nn.Sequential(model.class_embed, mapping_layer)
-        print("Mapping layer added: classification head now outputs", mapping_layer.out_features, "classes.")
+
+        print("Classification head replaced: now outputs", model.class_embed.out_features, "classes.")
+
     # --- END MAPPING LAYER ADDITION ---
 
 
@@ -180,14 +180,14 @@ def main(args):
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
-    # split the dataset into training and validation sets
-    if args.dataset_file == 'kitti':
-        # if the model is trained using kitti dataset
-        # then use the kitti dataset for training and validation as training 0.7 and validation 0.3
-        print("Using KITTI dataset for training and validation")
-        train_size = int(0.7 * len(dataset_train))
-        val_size = len(dataset_train) - train_size
-        dataset_train, dataset_val = torch.utils.data.random_split(dataset_train, [train_size, val_size])
+    # # split the dataset into training and validation sets
+    # if args.dataset_file == 'kitti':
+    #     # if the model is trained using kitti dataset
+    #     # then use the kitti dataset for training and validation as training 0.7 and validation 0.3
+    #     print("Using KITTI dataset for training and validation")
+    #     train_size = int(0.7 * len(dataset_train))
+    #     val_size = len(dataset_train) - train_size
+    #     dataset_train, dataset_val = torch.utils.data.random_split(dataset_train, [train_size, val_size])
 
     # initialize the data loaders
     if args.distributed:
@@ -219,7 +219,10 @@ def main(args):
     elif args.dataset_file == "coco":
         base_ds = get_coco_api_from_dataset(dataset_val)
     elif args.dataset_file == "kitti":
-        base_ds = get_kitti_api_from_dataset(dataset_val)
+        ann_path = 'E:\Projects\detr\kitti_annotations_train.json'
+        # load it as coco api object
+        kitti_api = COCO(ann_path)
+        base_ds = kitti_api
 
 
     # load the model from the checkpoint
@@ -236,14 +239,19 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
             state_dict = checkpoint['model']
-            # Rename the old keys to match your new 'class_embed.0.*' submodule
-            if "class_embed.weight" in state_dict:
-                state_dict["class_embed.0.weight"] = state_dict.pop("class_embed.weight")
-            if "class_embed.bias" in state_dict:
-                state_dict["class_embed.0.bias"] = state_dict.pop("class_embed.bias")
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
+            state_dict = checkpoint['model']
 
+
+        # Remove any keys associated with the classification head.
+        # This ensures that the new classification head (with output of 9) is not overwritten.
+        keys_to_remove = [k for k in state_dict.keys() if k.startswith("class_embed")]
+        for k in keys_to_remove:
+            print(f"Removing key from checkpoint: {k}")
+            state_dict.pop(k)
+
+        # Load the checkpoint state dict into the model (non-strict, since the classification head is missing)
         model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
 
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
