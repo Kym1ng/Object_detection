@@ -346,7 +346,7 @@ def build(args):
     losses = ['labels', 'boxes', 'cardinality']
     if args.masks:
         losses += ["masks"]
-    if args.dataset_file == 'kitti':
+    if args.coco_path == 'E:\Projects\dataset\coco_like_kitti':
         criterion = SetCriterion(8, matcher=matcher, weight_dict=weight_dict,
                              eos_coef=args.eos_coef, losses=losses)
     else:

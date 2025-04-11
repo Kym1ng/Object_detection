@@ -63,7 +63,7 @@ def get_kitti_api_from_dataset(dataset):
         image_id = int(target["image_id"].item())
         # Use the "size" key, which is the current image size after transforms, [height, width]
         h, w = target["size"].tolist()
-        file_name = f"{image_id:012d}.png"
+        file_name = f"{image_id:06d}.png"
 
         # Add image info
         kitti_dict["images"].append({
@@ -75,8 +75,10 @@ def get_kitti_api_from_dataset(dataset):
 
         # Denormalize boxes that are stored in normalized (cx,cy,w,h) format.
         normalized_boxes = target["boxes"]
-        abs_boxes = denormalize_boxes(normalized_boxes, (h, w))
-        for box, label in zip(abs_boxes, target["labels"]):
+        if idx == 0:
+            print("Normalized boxes:", normalized_boxes)
+        # abs_boxes = denormalize_boxes(normalized_boxes, (h, w))
+        for box, label in zip(normalized_boxes, target["labels"]):
             x1, y1, bw, bh = box.tolist()
             ann_id += 1
             kitti_dict["annotations"].append({

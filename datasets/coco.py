@@ -28,6 +28,10 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
+
+
+            
+            # coco does not apply transforms to target
         return img, target
 
 
@@ -151,14 +155,22 @@ def build(image_set, args):
     # set mode to instances
     mode = 'instances'
     # define paths
+
+    # original coco path
     PATHS = {
         "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
         "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+    }
+
+    # fake kitti path
+    fake_kitti_path = {
+        "train": (root / "train", root / "annotations" / 'kitti_annotations_train.json'),
+        "val": (root / "val", root / "annotations" / 'kitti_annotations_val.json'),
     }
     # load an instance of the COCO dataset
     # whats ann_file??
     # ann_file is the path to the annotation file
 
-    img_folder, ann_file = PATHS[image_set]
+    img_folder, ann_file = fake_kitti_path[image_set]
     dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks)
     return dataset

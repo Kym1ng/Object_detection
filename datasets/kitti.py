@@ -21,7 +21,6 @@ class KittiDetection(torchvision.datasets.Kitti):
         super(KittiDetection, self).__init__(root, train=training_flag, download=True)
         self._transforms = transforms
 
-
     def __getitem__(self, idx):
         img, ann = super(KittiDetection, self).__getitem__(idx)
         if ann is None:
@@ -30,8 +29,8 @@ class KittiDetection(torchvision.datasets.Kitti):
         # Convert annotations to DETR-compatible format
         target = self.prepare_kitti_target(idx, ann, img)
         if self._transforms is not None:
-            img, target = self._transforms(img, target)
-        return img, target
+            img, new_target = self._transforms(img, target)
+        return img, new_target
 
     def prepare_kitti_target(self, idx, ann, img):
         """ Converts KITTI annotations into COCO-like format for DETR. """
@@ -77,14 +76,20 @@ def make_kitti_transforms(image_set):
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
+    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+
     if image_set == "train":
+        print('do the train transform for kitti')
         return T.Compose([
             T.RandomHorizontalFlip(),
-            T.RandomResize([600, 800, 1000]),
+            
+            T.RandomResize(scales, max_size=1333),
+            
             normalize,
         ])
 
     if image_set == "val":
+        print('do the val transform for kitti')
         return T.Compose([
             T.RandomResize([800], max_size=1333),
             normalize,
