@@ -17,4 +17,5 @@ not_tracked_dir/
 
 # ignore the folder inference
 inference/
-601_replace/
+601_replace/*
+!601_replace/checkpoint0249.pth

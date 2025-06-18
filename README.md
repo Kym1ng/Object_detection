@@ -1,3 +1,5 @@
+This repository is based on the original [DETR: End-to-End Object Detection with Transformers](https://github.com/facebookresearch/detr) project by Facebook Research.
+
 **DE⫶TR**: End-to-End Object Detection with Transformers
 ========
 
