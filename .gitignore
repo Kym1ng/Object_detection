@@ -14,3 +14,7 @@ experiment-*
 .mypy_cache/*
 not_tracked_dir/
 .vscode
+
+# ignore the folder inference
+inference/
+601_replace/

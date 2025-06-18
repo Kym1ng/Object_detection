@@ -1,6 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
 import datetime
+import os # Added
 import json
 import random
 import time
@@ -16,6 +17,9 @@ from datasets import build_dataset, get_coco_api_from_dataset, get_kitti_api_fro
 from engine import evaluate, train_one_epoch
 from models import build_model
 from pycocotools.coco import COCO
+import cv2 # Added
+import torchvision.transforms.functional as TF # Added
+
 
 # read the parameters from the command line
 def get_args_parser():
@@ -96,7 +100,7 @@ def get_args_parser():
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval', action='store_true',default=True)
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
@@ -106,15 +110,53 @@ def get_args_parser():
     return parser
 
 
+# Added: KITTI class names if kitti2coco is used
+KITTI_CLASSES = ['Car', 'Van', 'Truck', 'Pedestrian', 'Person_sitting', 'Cyclist', 'Tram', 'Misc']
+
+# Added: Helper function to denormalize image tensor for visualization
+def denormalize_image(tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+    """Denormalizes a tensor image with mean and standard deviation."""
+    mean = torch.tensor(mean, device=tensor.device).view(3, 1, 1)
+    std = torch.tensor(std, device=tensor.device).view(3, 1, 1)
+    tensor = tensor * std + mean
+    tensor = torch.clamp(tensor, 0, 1)
+    return tensor
+
+# Added: Helper function to draw predictions on an image and save it
+def draw_and_save_predictions(image_tensor, predictions, output_path, class_names=None, original_size=None, confidence_threshold=0.55):
+    """Draws bounding boxes and labels on an image and saves it."""
+    img = denormalize_image(image_tensor.cpu())
+    img_pil = TF.to_pil_image(img)
+
+    if original_size is not None:
+        original_h, original_w = original_size
+        img_pil = img_pil.crop((0, 0, int(original_w), int(original_h)))
+
+    frame = np.array(img_pil)
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) # PIL is RGB, OpenCV is BGR
+
+    scores = predictions['scores']
+    labels = predictions['labels']
+    boxes = predictions['boxes']
+
+    for score, label, box in zip(scores, labels, boxes):
+        if score < confidence_threshold:
+            continue
+        
+        box_coords = box.cpu().numpy().astype(int)
+        x1, y1, x2, y2 = box_coords
+        class_id = label.item()
+        class_name = str(class_id) if class_names is None or not (0 <= class_id < len(class_names)) else class_names[class_id]
+        
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f"{class_name}: {score:.2f}", (x1, max(0, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    
+    cv2.imwrite(output_path, frame)
+
 def main(args):
     # initialize the distributed training
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
-
-    # print the arguments
-    if args.frozen_weights is not None:
-        assert args.masks, "Frozen training is meant for segmentation only"
-    print(args)
 
     # set the device
     device = torch.device(args.device)
@@ -131,79 +173,18 @@ def main(args):
 
     # load the dataset
     model_without_ddp = model
-    # if the model is trained using distributed training
-    if args.distributed:
-        # convert the model to distributed data parallel
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        # get the model without the distributed data parallel
-        model_without_ddp = model.module
-    
-
-    # --- ADD MAPPING LAYER FOR KITTI ---
-    # if current dataset is KITTI and we want to run it under COCO format
-    if args.kitti2coco:
-        # Freeze the entire model first to preserve pretrained weights
-        for param in model.parameters():
-            param.requires_grad = False
-
-        # Retrieve the input dimension of the existing classification head
-        in_features = model.class_embed.in_features
-
-        # Create a new linear layer with output dimension 9 (instead of the original 92, for example)
-        model.class_embed = torch.nn.Linear(in_features, 9).to(device)
-
-        # Unfreeze the new classification head's parameters, so they can be trained
-        for param in model.class_embed.parameters():
-            param.requires_grad = True
-
-        print("Classification head replaced: now outputs", model.class_embed.out_features, "classes.")
-
-    # --- END MAPPING LAYER ADDITION ---
-
 
     # print the number of parameters
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    # initialize the optimizer and the learning rate scheduler parameters
-    param_dicts = [
-        {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
-        {
-            "params": [p for n, p in model_without_ddp.named_parameters() if "backbone" in n and p.requires_grad],
-            "lr": args.lr_backbone,
-        },
-    ]
-
-    # initialize the optimizer and the learning rate scheduler
-    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
     # load the dataset
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
-    # # split the dataset into training and validation sets
-    # if args.dataset_file == 'kitti':
-    #     # if the model is trained using kitti dataset
-    #     # then use the kitti dataset for training and validation as training 0.7 and validation 0.3
-    #     print("Using KITTI dataset for training and validation")
-    #     train_size = int(0.7 * len(dataset_train))
-    #     val_size = len(dataset_train) - train_size
-    #     dataset_train, dataset_val = torch.utils.data.random_split(dataset_train, [train_size, val_size])
-
-    # initialize the data loaders
-    if args.distributed:
-        # if the model is trained using distributed training
-        # then use the distributed sampler for training and validation
-        sampler_train = DistributedSampler(dataset_train)
-        sampler_val = DistributedSampler(dataset_val, shuffle=False)
-
-    # if the model is not trained using distributed training
-    # then use the random sampler for training and sequential sampler for validation
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     # initialize the batch sampler for training
     batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
@@ -214,24 +195,9 @@ def main(args):
                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
 
-    # load the base dataset for evaluation
-    if args.dataset_file == "coco_panoptic":
-        # We also evaluate AP during panoptic training, on original coco DS
-        coco_val = datasets.coco.build("val", args)
-        base_ds = get_coco_api_from_dataset(coco_val)
-    elif args.dataset_file == "coco":
+    if args.dataset_file == "coco":
         base_ds = get_coco_api_from_dataset(dataset_val)
-    elif args.dataset_file == "kitti":
-        ann_path = 'E:\Projects\detr\kitti_annotations_train.json'
-        # load it as coco api object
-        kitti_api = COCO(ann_path)
-        base_ds = kitti_api
 
-
-    # load the model from the checkpoint
-    if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     # create the output directory
     output_dir = Path(args.output_dir)
@@ -243,27 +209,57 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
             state_dict = checkpoint['model']
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
             state_dict = checkpoint['model']
 
+        model_without_ddp.load_state_dict(state_dict)
 
-        # Remove any keys associated with the classification head.
-        # This ensures that the new classification head (with output of 9) is not overwritten.
-        keys_to_remove = [k for k in state_dict.keys() if k.startswith("class_embed")]
-        for k in keys_to_remove:
-            print(f"Removing key from checkpoint: {k}")
-            state_dict.pop(k)
-
-        # Load the checkpoint state dict into the model (non-strict, since the classification head is missing)
-        model_without_ddp.load_state_dict(state_dict, strict=False)
-
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-
+    start_time = time.time()
     # evaluate the model
     if args.eval:
+        # --- Visualize the first batch ---
+        print("Visualizing the first batch...")
+        vis_output_dir = output_dir / "visualizations_first_batch"
+        vis_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get an iterator for the validation data_loader
+        data_loader_val_iter = iter(data_loader_val)
+        try:
+            samples_vis, targets_vis = next(data_loader_val_iter)
+        except StopIteration:
+            print("Validation data loader is empty. Cannot visualize.")
+            samples_vis, targets_vis = None, None
+
+        if samples_vis is not None:
+            samples_vis = samples_vis.to(device)
+            targets_vis = [{k: v.to(device) for k, v in t.items()} for t in targets_vis]
+            orig_target_sizes_vis = torch.stack([t["orig_size"] for t in targets_vis], dim=0)
+
+            model.eval() # Ensure model is in eval mode
+            with torch.no_grad():
+                outputs_vis = model(samples_vis)
+                # Assuming 'bbox' postprocessor is always available and desired for visualization
+                results_vis = postprocessors['bbox'](outputs_vis, orig_target_sizes_vis)
+
+            for i in range(samples_vis.tensors.shape[0]):
+                img_tensor_vis = samples_vis.tensors[i]
+                # The mask could be used: samples_vis.mask[i]
+                # For cropping to original size before saving:
+                original_h, original_w = orig_target_sizes_vis[i].tolist()
+                
+                predictions_vis = results_vis[i] # {'scores': s, 'labels': l, 'boxes': b}
+                
+                current_class_names = None
+                if args.kitti2coco: # Check if this arg is correctly propagated or available
+                    current_class_names = KITTI_CLASSES
+                
+                vis_path = vis_output_dir / f"visualization_batch_0_img_{i}.png"
+                draw_and_save_predictions(img_tensor_vis, predictions_vis, str(vis_path), 
+                                          current_class_names, original_size=(original_h, original_w),
+                                          confidence_threshold=0.55) # You can adjust threshold
+            
+            print(f"First batch visualizations saved to {vis_output_dir}")
+        
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                             data_loader_val, base_ds, device, args.output_dir)
 
@@ -272,56 +268,11 @@ def main(args):
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
 
-    print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            sampler_train.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
-        lr_scheduler.step()
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 100 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 50 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
-        
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
-
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
-
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if (epoch + 1) % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
-
+    print(test_stats)
+    
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    print('eval time {}'.format(total_time_str))
 
 
 if __name__ == '__main__':

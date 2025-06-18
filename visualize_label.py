@@ -1,5 +1,6 @@
 import os
 import cv2
+from tqdm import tqdm
 
 def get_kitti_filename(idx):
     """
@@ -44,29 +45,34 @@ def draw_boxes_on_image(image_path, boxes, classes, output_path):
         cv2.putText(image, cls, (left, max(top-5, 10)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     cv2.imwrite(output_path, image)
-    print("Saved visualization to", output_path)
 
 if __name__ == "__main__":
     # Example usage
-    kitti_root = r"E:\Projects\dataset\KittiDetection\raw\training"   # Adjust to your KITTI root directory
+    kitti_root = r"E:\Projects\dataset\KittiDetection\raw\val" 
+    base_output_dir = r"inference\kitti_label"
+    os.makedirs(base_output_dir, exist_ok=True)
     image_dir = os.path.join(kitti_root, "image_2")
     label_dir = os.path.join(kitti_root, "label_2")
 
     idx = 0  # which sample you want to visualize
 
-    # Generate the 6-digit base name
-    base_name = get_kitti_filename(idx)  # e.g. "000010"
-    print("Base name:", base_name)
+    for img_file in tqdm(os.listdir(image_dir)):
+        if not img_file.endswith('.png'):
+            continue
+        idx = int(img_file.split('.')[0])
 
-    # Construct paths to image and label
-    image_path = os.path.join(image_dir, base_name + ".png")
-    label_path = os.path.join(label_dir, base_name + ".txt")
+        # Generate the 6-digit base name
+        base_name = get_kitti_filename(idx)  # e.g. "000010"
 
-    # Parse 2D bounding boxes from label
-    boxes, classes = parse_kitti_label(label_path)
+        # Construct paths to image and label
+        image_path = os.path.join(image_dir, base_name + ".png")
+        label_path = os.path.join(label_dir, base_name + ".txt")
 
-    # Output path for visualization
-    output_path = os.path.join(kitti_root, "vis_" + base_name + ".png")
+        # Parse 2D bounding boxes from label
+        boxes, classes = parse_kitti_label(label_path)
 
-    # Draw and save
-    draw_boxes_on_image(image_path, boxes, classes, output_path)
+        # Output path for visualization
+        current_output_file_path = os.path.join(base_output_dir, base_name + "_label.png")
+
+        # Draw and save
+        draw_boxes_on_image(image_path, boxes, classes, current_output_file_path)
